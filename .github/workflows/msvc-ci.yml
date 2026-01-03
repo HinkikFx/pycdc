@@ -1,29 +1,74 @@
+
 name: MSVC-CI
+
 on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: "Build configuration"
+        required: true
+        default: "Release"
+        type: choice
+        options:
+          - Release
+          - Debug
 
 jobs:
   build:
     runs-on: windows-latest
+
+    env:
+      BUILD_DIR: build
+      STAGE_DIR: dist
+
     steps:
-      - uses: actions/checkout@v2
-      - name: Configure and Build
-        run: |
-          mkdir build
-          cd build
-          cmake -G "Visual Studio 17 2022" -A Win32 ..
-          cmake --build . --config Debug
-          cmake --build . --config Release
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Test
-        run: |
-          cmake --build build --config Debug --target check
-          cmake --build build --config Release --target check
+      - name: Configure (x64)
+        run: >
+          cmake -S . -B $env:BUILD_DIR
+          -G "Visual Studio 17 2022" -A x64
 
-      - name: Upload artifact
+      - name: Build
+        run: >
+          cmake --build $env:BUILD_DIR
+          --config ${{ inputs.configuration || 'Release' }}
+          --parallel
+
+      # 安装到 staging 目录：如果你以后把库改成 SHARED，这里也会把 dll 安装出来（前提是 CMake install 规则包含它）
+      - name: Install to staging dir
+        run: >
+          cmake --install $env:BUILD_DIR
+          --config ${{ inputs.configuration || 'Release' }}
+          --prefix $env:STAGE_DIR
+
+      # 额外兜底：把 build/<config>/ 下的 exe/dll/pdb 也拷进 dist/bin（有些项目不写 install 规则也能保证收集到）
+      - name: Collect build outputs (exe/dll/pdb)
+        shell: pwsh
+        run: |
+          $cfg = "${{ inputs.configuration || 'Release' }}"
+          $outDir = Join-Path $env:BUILD_DIR $cfg
+          $binDir = Join-Path $env:STAGE_DIR "bin"
+
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+
+          if (Test-Path $outDir) {
+            Write-Host "Collecting from $outDir"
+            Get-ChildItem -Path $outDir -File -Include *.exe,*.dll,*.pdb -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_.FullName -Destination $binDir -Force }
+          } else {
+            Write-Host "Output directory not found: $outDir"
+          }
+
+          Write-Host "Staged files:"
+          Get-ChildItem -Path $env:STAGE_DIR -Recurse
+
+      - name: Upload artifact (full build output)
         uses: actions/upload-artifact@v4
         with:
-          name: pycdc-release
-          path: build\Release\*.exe
+          name: pycdc-win-x64-${{ inputs.configuration || 'Release' }}
+          path: dist/**
